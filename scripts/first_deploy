@@ -1,11 +1,78 @@
 #!/usr/bin/env bash
 
-rsync -havz --progress --stats ./scripts/ kvm4:/home/luizotavio/scripts/
+# Demo-only deployment helper used in the video. It resets the remote checkout,
+# removes Docker data through reset_vps, and rebuilds the deployment from scratch.
 
-ssh -t kvm4 '\
-  ( cd /projects/omxterm-web; git add .; git reset --hard; git pull --all --prune ) \
-  ; cd ~/scripts && ./reset_vps && ./setup_omxterm_web setup_kvm4.local.env'
+set -Eeuo pipefail
 
-ssh kvm4 "\
-  cat /projects/omxterm-web/.env | awk -F= '{\$1 == \"OMXTERM_ACCESS_TOKEN\" sub(/^[^=]*=/, \"\"); print; exit}'" \
+readonly CONFIRMATION='--yes-i-understand-this-destroys-data'
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+
+usage() {
+  cat <<EOF
+Usage: ${0##*/} ${CONFIRMATION}
+
+Required environment variables may override these public demo placeholders:
+  OMXTERM_DEPLOY_HOST         SSH host or alias (default: demo-vps)
+  OMXTERM_REMOTE_SCRIPTS_DIR  Remote scripts directory (default: /home/demo/scripts)
+  OMXTERM_REMOTE_CONFIG_FILE  Remote local config (default: setup_demo.local.env)
+
+WARNING: this resets the remote Git checkout and invokes the destructive
+reset_vps script. Read and adapt both scripts before running them.
+EOF
+}
+
+if [[ $# -ne 1 || "$1" != "$CONFIRMATION" ]]; then
+  usage >&2
+  exit 1
+fi
+
+readonly DEPLOY_HOST="${OMXTERM_DEPLOY_HOST:-demo-vps}"
+readonly REMOTE_SCRIPTS_DIR="${OMXTERM_REMOTE_SCRIPTS_DIR:-/home/demo/scripts}"
+readonly REMOTE_CONFIG_FILE="${OMXTERM_REMOTE_CONFIG_FILE:-setup_demo.local.env}"
+
+[[ "$DEPLOY_HOST" =~ ^[A-Za-z0-9._@-]+$ ]] || {
+  printf 'Invalid OMXTERM_DEPLOY_HOST.\n' >&2
+  exit 1
+}
+[[ "$REMOTE_SCRIPTS_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || {
+  printf 'OMXTERM_REMOTE_SCRIPTS_DIR must be a simple absolute path.\n' >&2
+  exit 1
+}
+[[ "$REMOTE_CONFIG_FILE" =~ ^[A-Za-z0-9._-]+$ ]] || {
+  printf 'OMXTERM_REMOTE_CONFIG_FILE must be a file name without a path.\n' >&2
+  exit 1
+}
+
+command -v rsync >/dev/null
+command -v ssh >/dev/null
+command -v pbcopy >/dev/null || {
+  printf 'This demo helper requires pbcopy to receive the access token on macOS.\n' >&2
+  exit 1
+}
+
+rsync -havz --progress --stats "${SCRIPT_DIR}/" "${DEPLOY_HOST}:${REMOTE_SCRIPTS_DIR}/"
+
+ssh "$DEPLOY_HOST" bash -s -- \
+  "$REMOTE_SCRIPTS_DIR" "$REMOTE_CONFIG_FILE" "$CONFIRMATION" <<'REMOTE'
+set -Eeuo pipefail
+
+readonly scripts_dir=$1
+readonly config_file=$2
+readonly confirmation=$3
+
+cd /projects/omxterm-web
+git reset --hard
+git pull --ff-only --prune
+
+cd "$scripts_dir"
+./reset_vps "$confirmation"
+./setup_omxterm_web --yes "$config_file"
+REMOTE
+
+ssh "$DEPLOY_HOST" \
+  "awk -F= '\$1 == \"OMXTERM_ACCESS_TOKEN\" { sub(/^[^=]*=/, \"\"); print; exit }' /projects/omxterm-web/.env" \
   | pbcopy
+
+printf 'The OMXTerm access token was copied to the local clipboard.\n'

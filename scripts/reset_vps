@@ -1,17 +1,55 @@
 #!/usr/bin/env bash
 
+# Destructive demo reset used before recording a clean first deployment.
+# This is not a general-purpose maintenance script.
+
+set -Eeuo pipefail
+
+readonly CONFIRMATION='--yes-i-understand-this-destroys-data'
+readonly APP_DIR="${OMXTERM_APP_DIR:-/projects/omxterm-web}"
+readonly EDGE_DIR="${OMXTERM_EDGE_DIR:-/projects/omxterm-edge}"
+
+usage() {
+  cat <<EOF
+Usage: ${0##*/} ${CONFIRMATION}
+
+DANGER: this stops every Docker container and prunes system-wide Docker
+containers, images, volumes, build cache, and networks on the current host. It
+also moves the OMXTerm environment and edge deployment directories aside.
+
+Do not run it on a shared host or on a machine containing data you need.
+EOF
+}
+
+if [[ $# -ne 1 || "$1" != "$CONFIRMATION" ]]; then
+  usage >&2
+  exit 1
+fi
+
+printf 'DESTRUCTIVE RESET: removing Docker data and the current demo deployment.\n' >&2
+
 {
-  docker stop `docker ps -q -a`
+  container_ids="$(docker ps -q -a)"
+  if [[ -n "$container_ids" ]]; then
+    # Intentional word splitting: Docker expects one argument per container ID.
+    # shellcheck disable=SC2086
+    docker stop $container_ids
+  fi
+
   docker builder prune -f
   docker system prune -f
   docker volume prune -f
-  docker builder prune -f
   docker network prune -f
   docker builder history rm --all
-  docker builder prune -f
   docker network rm omx omxterm-web-edge
-  docker image rm `docker image ls -q`
+
+  image_ids="$(docker image ls -q)"
+  if [[ -n "$image_ids" ]]; then
+    # Intentional word splitting: Docker expects one argument per image ID.
+    # shellcheck disable=SC2086
+    docker image rm $image_ids
+  fi
 } >/dev/null 2>&1 || true
 
-mv /projects/omxterm-web/.env /projects/omxterm-web/.env.bak >/dev/null 2>&1 || true
-mv /projects/omxterm-edge /projects/omxterm-edge.bak >/dev/null 2>&1 || true
+mv "${APP_DIR}/.env" "${APP_DIR}/.env.bak" >/dev/null 2>&1 || true
+mv "$EDGE_DIR" "${EDGE_DIR}.bak" >/dev/null 2>&1 || true

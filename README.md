@@ -12,7 +12,14 @@ O código-fonte e a documentação do OMXTerm Web estão no repositório princip
 
 ## Scripts utilizados no vídeo
 
-A pasta [`scripts/`](./scripts/) contém os scripts auxiliares e o arquivo de configuração de exemplo utilizados durante a demonstração.
+A pasta [`scripts/`](./scripts/) contém versões sanitizadas dos scripts auxiliares e do arquivo de configuração de exemplo utilizados durante a demonstração. Nomes de máquinas, usuários, credenciais e outros valores específicos do ambiente de gravação foram removidos ou substituídos por exemplos genéricos.
 
-Eles foram preparados para o ambiente específico apresentado no vídeo e podem executar operações destrutivas, especialmente `reset_vps`. Leia e adapte cada arquivo antes de executá-lo em outra máquina. Arquivos locais com credenciais ou valores reais não fazem parte deste repositório.
+> [!WARNING]
+> `first_deploy` e `reset_vps` são **destrutivos**. O primeiro redefine o checkout Git remoto e chama o segundo; `reset_vps` interrompe todos os containers e remove containers, imagens, volumes, cache e redes Docker do host. Não execute esses arquivos sem lê-los, adaptá-los e entender completamente seus efeitos — especialmente em servidores compartilhados ou com dados importantes.
+
+`setup_omxterm_web` também altera firewall, redes Docker e arquivos de implantação. Todos os scripts foram feitos para o cenário específico apresentado no vídeo, não como ferramentas genéricas de produção. Arquivos locais com credenciais ou valores reais não fazem parte deste repositório.
+
+## Licença
+
+Este material está disponível sob a [licença MIT](./LICENSE).
 
