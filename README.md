@@ -22,6 +22,7 @@ A pasta [`scripts/`](./scripts/) contém versões sanitizadas dos scripts auxili
 ## Fontes e referências
 
 1. [How the teleprinter works (1940) \[Dufaycolor\]](https://youtu.be/Mi2Sx-ZY410?si=YfXiibwzfE9dYEjh)
+2. [Teletype Model 33](https://en.wikipedia.org/wiki/Teletype_Model_33)
 
 ## Licença
 
