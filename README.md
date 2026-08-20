@@ -19,6 +19,10 @@ A pasta [`scripts/`](./scripts/) contém versões sanitizadas dos scripts auxili
 
 `setup_omxterm_web` também altera firewall, redes Docker e arquivos de implantação. Todos os scripts foram feitos para o cenário específico apresentado no vídeo, não como ferramentas genéricas de produção. Arquivos locais com credenciais ou valores reais não fazem parte deste repositório.
 
+## Fontes e referências
+
+1. [How the teleprinter works (1940) \[Dufaycolor\]](https://youtu.be/Mi2Sx-ZY410?si=YfXiibwzfE9dYEjh)
+
 ## Licença
 
 Este material está disponível sob a [licença MIT](./LICENSE).
