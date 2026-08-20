@@ -41,6 +41,7 @@ A demonstração requer Python 3, Tkinter, Bash e um sistema compatível com as 
 8. [OMSkills](https://github.com/luizomf/omskills)
 9. [AT&T Tech Channel](https://youtu.be/tc4ROCJYbm0?si=NFe-Ava08x4Ngby9)
 10. [OWASP Cheat Sheet Series](https://cheatsheetseries.owasp.org/index.html)
+11. [xterm.js](https://xtermjs.org/)
 
 ## Licença
 
