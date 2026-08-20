@@ -19,6 +19,10 @@ A pasta [`scripts/`](./scripts/) contém versões sanitizadas dos scripts auxili
 
 `setup_omxterm_web` também altera firewall, redes Docker e arquivos de implantação. Todos os scripts foram feitos para o cenário específico apresentado no vídeo, não como ferramentas genéricas de produção. Arquivos locais com credenciais ou valores reais não fazem parte deste repositório.
 
+## Diagramas
+
+O arquivo [`diagrams/omxterm-web-video-diagrams.excalidraw`](./diagrams/omxterm-web-video-diagrams.excalidraw) contém, em um único documento editável do Excalidraw, todos os diagramas apresentados ao longo do vídeo.
+
 ## Demonstração de pseudoterminal
 
 O arquivo [`demos/meu-terminal-pty.py`](./demos/meu-terminal-pty.py) é o exemplo didático utilizado no vídeo para mostrar a criação de um PTY, o processo de `fork`/`exec`, a conexão do shell ao lado *slave* e o papel básico exercido pelo lado *master*.
