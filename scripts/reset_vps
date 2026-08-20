@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+{
+  docker stop `docker ps -q -a`
+  docker builder prune -f
+  docker system prune -f
+  docker volume prune -f
+  docker builder prune -f
+  docker network prune -f
+  docker builder history rm --all
+  docker builder prune -f
+  docker network rm omx omxterm-web-edge
+  docker image rm `docker image ls -q`
+} >/dev/null 2>&1 || true
+
+mv /projects/omxterm-web/.env /projects/omxterm-web/.env.bak >/dev/null 2>&1 || true
+mv /projects/omxterm-edge /projects/omxterm-edge.bak >/dev/null 2>&1 || true

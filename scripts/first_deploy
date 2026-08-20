@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+rsync -havz --progress --stats ./scripts/ kvm4:/home/luizotavio/scripts/
+
+ssh -t kvm4 '\
+  ( cd /projects/omxterm-web; git add .; git reset --hard; git pull --all --prune ) \
+  ; cd ~/scripts && ./reset_vps && ./setup_omxterm_web setup_kvm4.local.env'
+
+ssh kvm4 "\
+  cat /projects/omxterm-web/.env | awk -F= '{\$1 == \"OMXTERM_ACCESS_TOKEN\" sub(/^[^=]*=/, \"\"); print; exit}'" \
+  | pbcopy

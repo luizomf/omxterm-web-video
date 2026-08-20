@@ -1,0 +1,2 @@
+# Local deployment configuration may contain infrastructure details or secrets.
+scripts/*.local.env

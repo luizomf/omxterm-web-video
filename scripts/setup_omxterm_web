@@ -1,0 +1,552 @@
+#!/usr/bin/env bash
+
+# One-time OMXTerm Web host bootstrap.
+#
+# The script creates a dedicated Docker edge network, narrow UFW rules, the
+# application .env, and a minimal Traefik stack. Deployment-specific values live
+# in a separate config file so this script can be shared safely.
+
+set -Eeuo pipefail
+
+readonly SCRIPT_NAME="${0##*/}"
+
+usage() {
+  cat <<EOF
+Usage:
+  ${SCRIPT_NAME} [--yes] CONFIG_FILE
+  ${SCRIPT_NAME} --check CONFIG_FILE
+  ${SCRIPT_NAME} --help
+
+Options:
+  --check  Validate the configuration without inspecting or changing the host.
+  --yes    Skip the interactive confirmation before changing the host.
+  --help   Show this help.
+
+Start from setup_omxterm_web.env.example. The config is sourced by Bash, so only
+use a file you trust.
+EOF
+}
+
+log() {
+  printf '[setup] %s\n' "$*"
+}
+
+warn() {
+  printf '[setup] WARNING: %s\n' "$*" >&2
+}
+
+fail() {
+  printf '[setup] STOP: %s\n' "$*" >&2
+  exit 1
+}
+
+on_error() {
+  local exit_code=$?
+  local line_number=$1
+
+  printf '[setup] Failed at line %s (exit %s). Inspect any reported partial changes; nothing was removed automatically.\n' \
+    "$line_number" "$exit_code" >&2
+  exit "$exit_code"
+}
+
+trap 'on_error "$LINENO"' ERR
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
+}
+
+load_config() {
+  local config_file=$1
+
+  [[ -f "$config_file" && -r "$config_file" ]] || {
+    fail "config file is not readable: $config_file"
+  }
+
+  # The config file is an explicit, trusted Bash configuration file.
+  # shellcheck disable=SC1090
+  source "$config_file"
+
+  : "${OMXTERM_PUBLIC_HOSTNAME:?Set OMXTERM_PUBLIC_HOSTNAME in the config file.}"
+  : "${OMXTERM_ACME_EMAIL:?Set OMXTERM_ACME_EMAIL in the config file.}"
+  : "${OMXTERM_SSH_ALLOWED_CIDRS:?Set OMXTERM_SSH_ALLOWED_CIDRS in the config file.}"
+
+  OMXTERM_APP_DIR="${OMXTERM_APP_DIR:-/projects/omxterm-web}"
+  OMXTERM_EDGE_DIR="${OMXTERM_EDGE_DIR:-/projects/omxterm-edge}"
+  OMXTERM_DEPLOY_BRANCH="${OMXTERM_DEPLOY_BRANCH:-main}"
+
+  OMXTERM_EDGE_NETWORK_NAME="${OMXTERM_EDGE_NETWORK_NAME:-omxterm-web-edge}"
+  OMXTERM_EDGE_SUBNET="${OMXTERM_EDGE_SUBNET:-10.210.0.0/24}"
+  OMXTERM_EDGE_IP_RANGE="${OMXTERM_EDGE_IP_RANGE:-10.210.0.128/25}"
+  OMXTERM_EDGE_GATEWAY="${OMXTERM_EDGE_GATEWAY:-10.210.0.1}"
+  OMXTERM_APP_EDGE_IP="${OMXTERM_APP_EDGE_IP:-10.210.0.10}"
+
+  OMXTERM_HOST_SSH_PORT="${OMXTERM_HOST_SSH_PORT:-22}"
+  OMXTERM_TRAEFIK_IMAGE="${OMXTERM_TRAEFIK_IMAGE:-traefik:v3.3.7}"
+  OMXTERM_TRAEFIK_PROJECT="${OMXTERM_TRAEFIK_PROJECT:-omxterm-edge}"
+  OMXTERM_RATE_LIMIT_AVERAGE="${OMXTERM_RATE_LIMIT_AVERAGE:-20}"
+  OMXTERM_RATE_LIMIT_BURST="${OMXTERM_RATE_LIMIT_BURST:-40}"
+  OMXTERM_RATE_LIMIT_PERIOD="${OMXTERM_RATE_LIMIT_PERIOD:-1s}"
+
+  OMXTERM_PUBLIC_ORIGIN="https://${OMXTERM_PUBLIC_HOSTNAME}"
+  OMXTERM_APP_ENV_FILE="${OMXTERM_APP_DIR}/.env"
+  OMXTERM_TRAEFIK_COMPOSE_FILE="${OMXTERM_EDGE_DIR}/compose.yml"
+  OMXTERM_TRAEFIK_DYNAMIC_FILE="${OMXTERM_EDGE_DIR}/traefik/dynamic.yml"
+  OMXTERM_APP_COMPOSE_OVERRIDE="${OMXTERM_EDGE_DIR}/omxterm.compose.yml"
+}
+
+validate_config() {
+  require_command python3
+
+  [[ "$OMXTERM_PUBLIC_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || {
+    fail 'OMXTERM_PUBLIC_HOSTNAME must be a hostname without a scheme or path.'
+  }
+
+  [[ "$OMXTERM_PUBLIC_HOSTNAME" == *.* ]] || {
+    fail 'OMXTERM_PUBLIC_HOSTNAME must be a fully qualified hostname.'
+  }
+
+  [[ "$OMXTERM_ACME_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || {
+    fail 'OMXTERM_ACME_EMAIL is not a valid email address.'
+  }
+
+  [[ "$OMXTERM_APP_DIR" == /* ]] || fail 'OMXTERM_APP_DIR must be absolute.'
+  [[ "$OMXTERM_EDGE_DIR" == /* ]] || fail 'OMXTERM_EDGE_DIR must be absolute.'
+  [[ "$OMXTERM_APP_DIR" != "$OMXTERM_EDGE_DIR" ]] || {
+    fail 'OMXTERM_APP_DIR and OMXTERM_EDGE_DIR must be different.'
+  }
+
+  [[ "$OMXTERM_EDGE_NETWORK_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || {
+    fail 'OMXTERM_EDGE_NETWORK_NAME contains unsupported characters.'
+  }
+
+  [[ "$OMXTERM_TRAEFIK_PROJECT" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || {
+    fail 'OMXTERM_TRAEFIK_PROJECT contains unsupported characters.'
+  }
+
+  [[ "$OMXTERM_TRAEFIK_IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || {
+    fail 'OMXTERM_TRAEFIK_IMAGE contains unsupported characters.'
+  }
+
+  [[ "$OMXTERM_DEPLOY_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || {
+    fail 'OMXTERM_DEPLOY_BRANCH contains unsupported characters.'
+  }
+
+  if [[ ! "$OMXTERM_HOST_SSH_PORT" =~ ^[0-9]+$ ]] ||
+    ((OMXTERM_HOST_SSH_PORT < 1 || OMXTERM_HOST_SSH_PORT > 65535)); then
+    fail 'OMXTERM_HOST_SSH_PORT must be between 1 and 65535.'
+  fi
+
+  [[ "$OMXTERM_RATE_LIMIT_AVERAGE" =~ ^[1-9][0-9]*$ ]] || {
+    fail 'OMXTERM_RATE_LIMIT_AVERAGE must be a positive integer.'
+  }
+  [[ "$OMXTERM_RATE_LIMIT_BURST" =~ ^[1-9][0-9]*$ ]] || {
+    fail 'OMXTERM_RATE_LIMIT_BURST must be a positive integer.'
+  }
+  [[ "$OMXTERM_RATE_LIMIT_PERIOD" =~ ^[1-9][0-9]*(ms|s|m|h)$ ]] || {
+    fail 'OMXTERM_RATE_LIMIT_PERIOD must look like 500ms, 1s, 1m, or 1h.'
+  }
+
+  OMXTERM_SSH_ALLOWED_CIDRS="$({
+    python3 - \
+      "$OMXTERM_EDGE_SUBNET" \
+      "$OMXTERM_EDGE_IP_RANGE" \
+      "$OMXTERM_EDGE_GATEWAY" \
+      "$OMXTERM_APP_EDGE_IP" \
+      "$OMXTERM_SSH_ALLOWED_CIDRS" <<'PY'
+import ipaddress
+import sys
+
+edge_subnet_raw, edge_range_raw, gateway_raw, app_ip_raw, allowed_raw = sys.argv[1:]
+
+try:
+    edge_subnet = ipaddress.ip_network(edge_subnet_raw, strict=True)
+    edge_range = ipaddress.ip_network(edge_range_raw, strict=True)
+    gateway = ipaddress.ip_address(gateway_raw)
+    app_ip = ipaddress.ip_address(app_ip_raw)
+except ValueError as error:
+    raise SystemExit(f"invalid edge network configuration: {error}")
+
+if edge_subnet.version != 4 or edge_range.version != 4:
+    raise SystemExit("the Docker edge network must use IPv4")
+if not edge_range.subnet_of(edge_subnet):
+    raise SystemExit("OMXTERM_EDGE_IP_RANGE must be inside OMXTERM_EDGE_SUBNET")
+if gateway not in edge_subnet:
+    raise SystemExit("OMXTERM_EDGE_GATEWAY must be inside OMXTERM_EDGE_SUBNET")
+if app_ip not in edge_subnet:
+    raise SystemExit("OMXTERM_APP_EDGE_IP must be inside OMXTERM_EDGE_SUBNET")
+if app_ip == gateway:
+    raise SystemExit("OMXTERM_APP_EDGE_IP must differ from OMXTERM_EDGE_GATEWAY")
+if app_ip in edge_range:
+    raise SystemExit("OMXTERM_APP_EDGE_IP must stay outside OMXTERM_EDGE_IP_RANGE")
+
+normalized = []
+for raw_value in allowed_raw.split(","):
+    value = raw_value.strip()
+    if not value:
+        raise SystemExit("OMXTERM_SSH_ALLOWED_CIDRS contains an empty entry")
+    try:
+        network = ipaddress.ip_network(value, strict=True)
+    except ValueError as error:
+        raise SystemExit(f"invalid SSH allowlist entry {value!r}: {error}")
+    normalized.append(str(network))
+
+if not normalized:
+    raise SystemExit("OMXTERM_SSH_ALLOWED_CIDRS must contain at least one CIDR")
+
+print(",".join(normalized))
+PY
+  } 2> >(while IFS= read -r line; do printf '[setup] STOP: %s\n' "$line" >&2; done)
+  )"
+}
+
+config_summary() {
+  local cidr_count
+  cidr_count="$(awk -F, '{print NF}' <<<"$OMXTERM_SSH_ALLOWED_CIDRS")"
+
+  cat <<EOF
+Configuration is valid:
+  Public origin:       ${OMXTERM_PUBLIC_ORIGIN}
+  Application:         ${OMXTERM_APP_DIR}
+  Traefik stack:       ${OMXTERM_EDGE_DIR}
+  Edge network:        ${OMXTERM_EDGE_NETWORK_NAME} (${OMXTERM_EDGE_SUBNET})
+  Application edge IP: ${OMXTERM_APP_EDGE_IP}
+  SSH destinations:    ${cidr_count} CIDR(s)
+  Traefik image:       ${OMXTERM_TRAEFIK_IMAGE}
+EOF
+}
+
+initialize_privilege_command() {
+  if ((EUID == 0)); then
+    SUDO=()
+    return
+  fi
+
+  require_command sudo
+  SUDO=(sudo)
+  "${SUDO[@]}" -n true || {
+    fail 'passwordless sudo is required for the host firewall changes.'
+  }
+}
+
+preflight_host() {
+  local command_name
+  local listeners
+  local routes
+  local ufw_status
+
+  for command_name in curl docker git ip openssl ss ufw; do
+    require_command "$command_name"
+  done
+
+  docker compose version >/dev/null
+  initialize_privilege_command
+
+  [[ -d "$OMXTERM_APP_DIR" ]] || fail "application directory not found: $OMXTERM_APP_DIR"
+  [[ -x "$OMXTERM_APP_DIR/scripts/deploy" ]] || {
+    fail "deployment helper is not executable: $OMXTERM_APP_DIR/scripts/deploy"
+  }
+  [[ -f "$OMXTERM_APP_DIR/compose.yml" ]] || {
+    fail "application Compose file not found: $OMXTERM_APP_DIR/compose.yml"
+  }
+
+  git -C "$OMXTERM_APP_DIR" rev-parse --is-inside-work-tree >/dev/null
+  [[ -z "$(git -C "$OMXTERM_APP_DIR" status --porcelain)" ]] || {
+    fail "application checkout is dirty: $OMXTERM_APP_DIR"
+  }
+  git -C "$OMXTERM_APP_DIR" check-ignore -q .env || {
+    fail "$OMXTERM_APP_ENV_FILE is not ignored by Git"
+  }
+
+  [[ ! -e "$OMXTERM_APP_ENV_FILE" ]] || {
+    fail "$OMXTERM_APP_ENV_FILE already exists; inspect it instead of overwriting it."
+  }
+  [[ ! -e "$OMXTERM_EDGE_DIR" ]] || {
+    fail "$OMXTERM_EDGE_DIR already exists; inspect it instead of overwriting it."
+  }
+
+  if docker network inspect "$OMXTERM_EDGE_NETWORK_NAME" >/dev/null 2>&1; then
+    fail "Docker network already exists: $OMXTERM_EDGE_NETWORK_NAME"
+  fi
+
+  routes="$(ip -4 route show table all)"
+  if [[ "$routes" == *"$OMXTERM_EDGE_SUBNET"* ]]; then
+    fail "$OMXTERM_EDGE_SUBNET conflicts with a current host route."
+  fi
+
+  listeners="$(ss -H -ltn '( sport = :80 or sport = :443 or sport = :3000 )')"
+  if [[ -n "$listeners" ]]; then
+    ss -H -ltnp '( sport = :80 or sport = :443 or sport = :3000 )' >&2 || true
+    fail 'TCP/80, TCP/443, or TCP/3000 is already in use.'
+  fi
+
+  ufw_status="$("${SUDO[@]}" ufw status)"
+  [[ "${ufw_status%%$'\n'*}" == 'Status: active' ]] || {
+    fail 'UFW must already be active; this script will not enable or reset it.'
+  }
+}
+
+confirm_changes() {
+  local answer
+
+  config_summary
+  cat <<'EOF'
+
+This one-time bootstrap will create the edge directory and Docker network, add
+public TCP/80 and TCP/443 UFW rules, allow the fixed application IP to reach the
+host SSH port, generate the application access token, deploy OMXTerm Web, and
+start Traefik.
+EOF
+
+  if [[ "$ASSUME_YES" == true ]]; then
+    return
+  fi
+
+  [[ -t 0 ]] || fail 'interactive confirmation requires a terminal; use --yes after reviewing the plan.'
+  read -r -p 'Type yes to continue: ' answer
+  [[ "$answer" == yes ]] || fail 'cancelled; no changes were made.'
+}
+
+write_edge_configuration() {
+  log "creating Traefik configuration in $OMXTERM_EDGE_DIR"
+
+  install -d -m 0750 \
+    "$OMXTERM_EDGE_DIR/traefik" \
+    "$OMXTERM_EDGE_DIR/letsencrypt"
+  install -m 0600 /dev/null "$OMXTERM_EDGE_DIR/letsencrypt/acme.json"
+
+  cat >"$OMXTERM_TRAEFIK_COMPOSE_FILE" <<YAML
+services:
+  traefik:
+    image: '${OMXTERM_TRAEFIK_IMAGE}'
+    restart: unless-stopped
+    command:
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.email=${OMXTERM_ACME_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --log.level=INFO
+    ports:
+      - '0.0.0.0:80:80/tcp'
+      - '0.0.0.0:443:443/tcp'
+    volumes:
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./letsencrypt:/letsencrypt
+    networks:
+      - edge
+
+networks:
+  edge:
+    name: '${OMXTERM_EDGE_NETWORK_NAME}'
+    external: true
+YAML
+
+  cat >"$OMXTERM_TRAEFIK_DYNAMIC_FILE" <<YAML
+http:
+  routers:
+    omxterm-web:
+      rule: 'Host(\`${OMXTERM_PUBLIC_HOSTNAME}\`)'
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: le
+      middlewares:
+        - omxterm-web-ratelimit
+      service: omxterm-web
+
+  middlewares:
+    omxterm-web-ratelimit:
+      rateLimit:
+        average: ${OMXTERM_RATE_LIMIT_AVERAGE}
+        burst: ${OMXTERM_RATE_LIMIT_BURST}
+        period: ${OMXTERM_RATE_LIMIT_PERIOD}
+
+  services:
+    omxterm-web:
+      loadBalancer:
+        servers:
+          - url: 'http://omxterm-web:3000'
+YAML
+
+  cat >"$OMXTERM_APP_COMPOSE_OVERRIDE" <<YAML
+services:
+  omxterm-web:
+    restart: always
+    networks:
+      edge:
+        ipv4_address: '${OMXTERM_APP_EDGE_IP}'
+
+networks:
+  edge:
+    name: '${OMXTERM_EDGE_NETWORK_NAME}'
+    external: true
+YAML
+
+  chmod 0640 \
+    "$OMXTERM_TRAEFIK_COMPOSE_FILE" \
+    "$OMXTERM_TRAEFIK_DYNAMIC_FILE" \
+    "$OMXTERM_APP_COMPOSE_OVERRIDE"
+
+  docker compose \
+    --project-name "$OMXTERM_TRAEFIK_PROJECT" \
+    --project-directory "$OMXTERM_EDGE_DIR" \
+    -f "$OMXTERM_TRAEFIK_COMPOSE_FILE" \
+    config >/dev/null
+}
+
+write_application_environment() {
+  local access_token
+
+  log "creating $OMXTERM_APP_ENV_FILE"
+  access_token="$(openssl rand -hex 32)"
+
+  umask 077
+  {
+    printf 'OMXTERM_ACCESS_TOKEN=%s\n' "$access_token"
+    printf 'OMXTERM_ALLOWED_ORIGIN=%s\n' "$OMXTERM_PUBLIC_ORIGIN"
+    printf 'OMXTERM_SECURE_COOKIES=true\n'
+    printf 'OMXTERM_SSH_ALLOWED_CIDR=%s\n' "$OMXTERM_SSH_ALLOWED_CIDRS"
+    printf 'OMXTERM_TRUST_PROXY=%s\n' "$OMXTERM_EDGE_SUBNET"
+  } >"$OMXTERM_APP_ENV_FILE"
+  unset access_token
+  chmod 0600 "$OMXTERM_APP_ENV_FILE"
+
+  docker compose \
+    --project-name omxterm-web \
+    --project-directory "$OMXTERM_APP_DIR" \
+    -f "$OMXTERM_APP_DIR/compose.yml" \
+    -f "$OMXTERM_APP_COMPOSE_OVERRIDE" \
+    config >/dev/null
+}
+
+create_edge_network() {
+  log "creating Docker network $OMXTERM_EDGE_NETWORK_NAME"
+
+  docker network create \
+    --driver bridge \
+    --subnet "$OMXTERM_EDGE_SUBNET" \
+    --ip-range "$OMXTERM_EDGE_IP_RANGE" \
+    --gateway "$OMXTERM_EDGE_GATEWAY" \
+    "$OMXTERM_EDGE_NETWORK_NAME" >/dev/null
+
+  docker network inspect "$OMXTERM_EDGE_NETWORK_NAME" \
+    --format 'network={{.Name}} ipam={{json .IPAM.Config}}'
+}
+
+configure_firewall() {
+  log 'adding narrow UFW rules without resetting existing policy'
+
+  "${SUDO[@]}" ufw allow proto tcp from 0.0.0.0/0 to any port 80 \
+    comment 'Traefik HTTP and ACME'
+  "${SUDO[@]}" ufw allow proto tcp from 0.0.0.0/0 to any port 443 \
+    comment 'Traefik HTTPS'
+  "${SUDO[@]}" ufw allow from "${OMXTERM_APP_EDGE_IP}/32" \
+    to any port "$OMXTERM_HOST_SSH_PORT" proto tcp \
+    comment 'OMXTerm Docker SSH fixed'
+}
+
+deploy_application() {
+  log 'deploying OMXTerm Web with the generated production override'
+
+  OMXTERM_DIR="$OMXTERM_APP_DIR" \
+    OMXTERM_DEPLOY_BRANCH="$OMXTERM_DEPLOY_BRANCH" \
+    OMXTERM_COMPOSE_OVERRIDE="$OMXTERM_APP_COMPOSE_OVERRIDE" \
+    "$OMXTERM_APP_DIR/scripts/deploy"
+
+  curl --retry 10 --retry-delay 1 --retry-connrefused --retry-all-errors \
+    --max-time 30 --fail --show-error \
+    http://127.0.0.1:3000/health
+}
+
+start_traefik() {
+  log 'starting Traefik'
+
+  docker compose \
+    --project-name "$OMXTERM_TRAEFIK_PROJECT" \
+    --project-directory "$OMXTERM_EDGE_DIR" \
+    -f "$OMXTERM_TRAEFIK_COMPOSE_FILE" \
+    up -d
+}
+
+print_completion() {
+  local quoted_app_dir
+  local quoted_override
+
+  printf -v quoted_app_dir '%q' "$OMXTERM_APP_DIR"
+  printf -v quoted_override '%q' "$OMXTERM_APP_COMPOSE_OVERRIDE"
+
+  cat <<EOF
+
+Setup completed. The generated access token remains only in:
+  ${OMXTERM_APP_ENV_FILE}
+
+Use this app-only command for future deployments:
+  OMXTERM_DIR=${quoted_app_dir} OMXTERM_COMPOSE_OVERRIDE=${quoted_override} ${quoted_app_dir}/scripts/deploy
+
+Next, verify DNS, HTTPS certificate issuance, the browser access gate, WSS, SSH
+host-key confirmation, and one rejected destination. Do not print .env or
+letsencrypt/acme.json in logs, videos, or chat.
+EOF
+}
+
+main() {
+  local mode=run
+  local config_file=''
+  ASSUME_YES=false
+
+  while (($# > 0)); do
+    case "$1" in
+      --check)
+        mode=check
+        ;;
+      --yes)
+        ASSUME_YES=true
+        ;;
+      --help | -h)
+        usage
+        return
+        ;;
+      --*)
+        usage >&2
+        fail "unknown option: $1"
+        ;;
+      *)
+        [[ -z "$config_file" ]] || {
+          usage >&2
+          fail 'provide exactly one config file.'
+        }
+        config_file=$1
+        ;;
+    esac
+    shift
+  done
+
+  [[ -n "$config_file" ]] || {
+    usage >&2
+    fail 'a config file is required.'
+  }
+
+  load_config "$config_file"
+  validate_config
+
+  if [[ "$mode" == check ]]; then
+    config_summary
+    return
+  fi
+
+  preflight_host
+  confirm_changes
+  write_edge_configuration
+  write_application_environment
+  create_edge_network
+  configure_firewall
+  deploy_application
+  start_traefik
+  print_completion
+}
+
+main "$@"
