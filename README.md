@@ -37,6 +37,9 @@ A demonstração requer Python 3, Tkinter, Bash e um sistema compatível com as 
 4. [The TTY demystified](https://www.linusakesson.net/programming/tty/)
 5. [Ken Thompson](https://en.wikipedia.org/wiki/Ken_Thompson)
 6. [Tweeting from the Teletype: How To](https://www.youtube.com/watch?v=X904FYolBs0)
+7. [Pi Configs](https://github.com/luizomf/ompi)
+8. [OMSkills](https://github.com/luizomf/omskills)
+9. [AT&T Tech Channel](https://youtu.be/tc4ROCJYbm0?si=NFe-Ava08x4Ngby9)
 
 ## Licença
 
