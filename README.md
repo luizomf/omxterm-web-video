@@ -19,6 +19,18 @@ A pasta [`scripts/`](./scripts/) contém versões sanitizadas dos scripts auxili
 
 `setup_omxterm_web` também altera firewall, redes Docker e arquivos de implantação. Todos os scripts foram feitos para o cenário específico apresentado no vídeo, não como ferramentas genéricas de produção. Arquivos locais com credenciais ou valores reais não fazem parte deste repositório.
 
+### Manutenção mensal da imagem do Traefik
+
+Uma vez por mês, um mantenedor deve revisar manualmente a imagem do proxy:
+
+1. Consulte os [releases oficiais do Traefik](https://github.com/traefik/traefik/releases) e os [avisos de segurança oficiais](https://github.com/traefik/traefik/security/advisories). Escolha uma versão estável que inclua todas as correções aplicáveis; não use apenas uma tag mutável como `latest`.
+2. Resolva o digest do índice multiplataforma da Docker Official Image com `docker buildx imagetools inspect traefik:vX.Y.Z`. Confirme que o campo `Digest` do índice, e não o digest de uma imagem de plataforma individual, tem o formato `sha256:` seguido por 64 caracteres hexadecimais.
+3. Forme a referência legível e imutável `traefik:vX.Y.Z@sha256:<digest>` e atualize juntos o padrão de `scripts/setup_omxterm_web` e o valor público de `scripts/setup_omxterm_web.env.example`.
+4. Na raiz do repositório, execute o teste focado com `bash tests/traefik_image_pin_test.sh`, verifique a sintaxe com `bash -n tests/traefik_image_pin_test.sh scripts/first_deploy scripts/reset_vps scripts/setup_omxterm_web scripts/setup_omxterm_web.env.example` e finalize com `git diff --check`. Revise o diff para confirmar que somente a atualização pretendida e sua documentação entraram na mudança.
+5. Somente em um ambiente descartável e explicitamente autorizado, registre a referência atual para rollback e atualize apenas o serviço Traefik existente. Preserve o container da aplicação, a rede Docker, o armazenamento ACME, certificados, firewall e demais recursos do host.
+6. Verifique de fora e de dentro do host: redirecionamento HTTP para HTTPS e certificado público válido; resposta do controle de acesso e da aplicação; sessão WSS no navegador até o SSH, incluindo confirmação da chave do host e um comando sentinela interativo; endereço real do cliente no caminho de proxy confiável e rejeição de `X-Forwarded-For` forjado; e versão e digest esperados no container em execução.
+7. Se qualquer verificação falhar, restaure somente o serviço Traefik com a referência registrada no passo anterior e repita as verificações. Não faça limpeza ampla nem altere outros recursos para corrigir a atualização.
+
 ## Diagramas
 
 O arquivo [`diagrams/omxterm-web-video-diagrams.excalidraw`](./diagrams/omxterm-web-video-diagrams.excalidraw) contém, em um único documento editável do Excalidraw, todos os diagramas apresentados ao longo do vídeo.
@@ -46,4 +58,3 @@ A demonstração requer Python 3, Tkinter, Bash e um sistema compatível com as 
 ## Licença
 
 Este material está disponível sob a [licença MIT](./LICENSE).
-
